@@ -123,6 +123,11 @@ texture/view；GPU 资源只由创建它们的渲染线程释放。
 
 ## 原版桥接
 
+`EntityRenderStateAccessor` 的实体引用只在对应提取路径中绑定，不能假定所有渲染状态都持有实体。
+例如 26.2 的背包预览直接调用 `EntityRenderer.createRenderState`，绕过
+`EntityRenderDispatcher.extractEntity` 中的绑定。`Chams.isValidEntity(null)` 返回 `false`，
+让这类 GUI 模型继续按原版路径提交，不参与 Chams。
+
 `EpsilonGuiRenderer` 复用原版 `GuiRenderState` 与 `FeatureRenderDispatcher`，负责在 Epsilon 事件之后
 提交提取结果。需要走原版管线的内容（物品、提示框等）继续使用 `GuiGraphicsExtractor`；Epsilon 的
 UI 节点则由 Lumin 渲染，两者在 `GuiRenderer.render` 中按固定顺序合并。
