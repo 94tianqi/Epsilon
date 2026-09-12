@@ -1,6 +1,7 @@
 package com.github.epsilon.managers;
 
 import com.github.epsilon.Constants;
+import com.github.epsilon.assets.ffmpeg.FFmpegNativePlatform;
 import com.github.epsilon.assets.i18n.EpsilonTranslations;
 import com.github.epsilon.gui.screen.AssetDownloadScreen;
 import com.github.epsilon.modules.impl.ClientSetting;
@@ -17,6 +18,7 @@ import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -35,12 +37,14 @@ public class AssetManager {
 
     public static final String DEFAULT_RESOURCE_BASE_URL =
             "https://github.com/NekoyaHouse/Epsilon-Resources/releases/download/assets-v1/";
-    public static final String DEFAULT_FFMPEG_URL =
-            "https://maven.aliyun.com/repository/public/org/bytedeco/ffmpeg/6.1.1-1.5.10/ffmpeg-6.1.1-1.5.10-windows-x86_64.jar";
 
     public static final String VIDEO_FILE_NAME = "columbina.mp4";
+    public static final String LIGHT_TRAILS_FILE_NAME = "lighttrails.png";
     public static final String REISA_ARCHIVE_NAME = "reisa.zip";
-    public static final String FFMPEG_ARCHIVE_NAME = "ffmpeg-6.1.1-1.5.10-windows-x86_64.jar";
+    /**
+     * 下载时使用的中立临时名；真正的产物名与原生库清单由 {@link FFmpegNativePlatform} 按平台决定。
+     */
+    public static final String FFMPEG_ARCHIVE_NAME = "ffmpeg-natives.jar";
 
     private static final long MIN_VIDEO_BYTES = 1L << 20;
     private static final long MIN_IMAGE_BYTES = 4L << 10;
@@ -53,12 +57,6 @@ public class AssetManager {
             "10", "11", "12", "13", "14", "15", "16", "17", "18", "99"
     );
 
-    private static final List<String> FFMPEG_NATIVE_FILES = List.of(
-            "avcodec-60.dll", "avdevice-60.dll", "avfilter-9.dll", "avformat-60.dll", "avutil-58.dll",
-            "jniavcodec.dll", "jniavdevice.dll", "jniavfilter.dll", "jniavformat.dll", "jniavutil.dll",
-            "jniswresample.dll", "jniswscale.dll", "swresample-4.dll", "swscale-7.dll"
-    );
-
     private static final byte[] PNG_MAGIC = {(byte) 0x89, 'P', 'N', 'G'};
 
     /**
@@ -66,14 +64,15 @@ public class AssetManager {
      */
     public enum Asset {
 
-        VIDEO(VIDEO_FILE_NAME, 20_788_534L),
-        REISA(REISA_ARCHIVE_NAME, 8_825_221L),
-        FFMPEG(FFMPEG_ARCHIVE_NAME, 24_461_014L);
+        VIDEO(VIDEO_FILE_NAME, () -> 20_788_534L),
+        LIGHT_TRAILS(LIGHT_TRAILS_FILE_NAME, () -> 3_681_336L),
+        REISA(REISA_ARCHIVE_NAME, () -> 8_825_221L),
+        FFMPEG(FFMPEG_ARCHIVE_NAME, () -> FFmpegNativePlatform.currentOrDefault().archiveBytes());
 
         private final String fileName;
-        private final long expectedBytes;
+        private final LongSupplier expectedBytes;
 
-        Asset(String fileName, long expectedBytes) {
+        Asset(String fileName, LongSupplier expectedBytes) {
             this.fileName = fileName;
             this.expectedBytes = expectedBytes;
         }
@@ -86,11 +85,11 @@ public class AssetManager {
          * 预估体积，仅用于下载界面的体积展示与整体进度估算。
          */
         public long expectedBytes() {
-            return expectedBytes;
+            return expectedBytes.getAsLong();
         }
 
         public boolean isVideoDependent() {
-            return this == VIDEO || this == FFMPEG;
+            return this == VIDEO || this == LIGHT_TRAILS || this == FFMPEG;
         }
 
     }
@@ -171,13 +170,14 @@ public class AssetManager {
     private final Path rootDir = ConfigManager.INSTANCE.getConfigDir().resolve("assets");
     private final Path videoDir = rootDir.resolve("video");
     private final Path videoFile = videoDir.resolve(VIDEO_FILE_NAME);
+    private final Path lightTrailsFile = videoDir.resolve(LIGHT_TRAILS_FILE_NAME);
     private final Path reisaDir = rootDir.resolve("reisa");
     private final Path ffmpegDir = rootDir.resolve("ffmpeg");
     private final Path ffmpegNativeDir = ffmpegDir.resolve("natives");
     private final Path tempDir = rootDir.resolve(".tmp");
 
     private final Set<Asset> declinedThisSession = EnumSet.noneOf(Asset.class);
-    private final Map<String, Identifier> reisaTextures = new HashMap<>();
+    private final Map<String, Identifier> registeredTextures = new HashMap<>();
 
     private volatile DownloadJob activeJob;
     private boolean legacyVideoChecked;
@@ -199,10 +199,10 @@ public class AssetManager {
     // ------------------------------------------------------------------
 
     /**
-     * 主菜单视频依赖 Windows x86_64 的 FFmpeg 原生库。
+     * 主菜单视频依赖 Windows x86_64 或 macOS arm64 的 FFmpeg 原生库。
      */
     public boolean isVideoSupported() {
-        return ClientPlatform.isWindowsX64();
+        return FFmpegNativePlatform.current() != null;
     }
 
     public boolean isAssetSupported(Asset asset) {
@@ -221,6 +221,7 @@ public class AssetManager {
     public boolean isReady(Asset asset) {
         return switch (asset) {
             case VIDEO -> isVideoReady();
+            case LIGHT_TRAILS -> isLightTrailsReady();
             case REISA -> isReisaReady();
             case FFMPEG -> isFfmpegReady();
         };
@@ -229,6 +230,10 @@ public class AssetManager {
     public boolean isVideoReady() {
         migrateLegacyVideo();
         return isFile(videoFile, MIN_VIDEO_BYTES);
+    }
+
+    public boolean isLightTrailsReady() {
+        return isFile(lightTrailsFile, MIN_IMAGE_BYTES);
     }
 
     public boolean isReisaReady() {
@@ -251,10 +256,11 @@ public class AssetManager {
     }
 
     public boolean isFfmpegReady() {
-        if (!isVideoSupported()) {
+        FFmpegNativePlatform platform = FFmpegNativePlatform.current();
+        if (platform == null) {
             return false;
         }
-        for (String name : FFMPEG_NATIVE_FILES) {
+        for (String name : platform.nativeFiles()) {
             if (!isFile(ffmpegNativeDir.resolve(name), MIN_NATIVE_BYTES)) {
                 return false;
             }
@@ -319,6 +325,7 @@ public class AssetManager {
             if (mc.gui.screen() instanceof AssetDownloadScreen) {
                 return;
             }
+            normalizeFfmpegDownloadUrl();
             mc.gui.setScreen(new AssetDownloadScreen(mc.gui.screen(), selected, declineOnClose));
         });
     }
@@ -447,6 +454,7 @@ public class AssetManager {
     private void install(Asset asset, Path part) throws IOException {
         switch (asset) {
             case VIDEO -> installVideo(part);
+            case LIGHT_TRAILS -> installLightTrails(part);
             case REISA -> installReisa(part);
             case FFMPEG -> installFfmpeg(part);
         }
@@ -458,6 +466,15 @@ public class AssetManager {
         }
         Files.createDirectories(videoDir);
         moveReplacing(part, videoFile);
+    }
+
+    private void installLightTrails(Path part) throws IOException {
+        if (!isPng(part)) {
+            throw new IOException("Downloaded light trails overlay is not a valid PNG file");
+        }
+        Files.createDirectories(videoDir);
+        moveReplacing(part, lightTrailsFile);
+        releaseRegisteredTextures();
     }
 
     private void installReisa(Path archive) throws IOException {
@@ -492,13 +509,18 @@ public class AssetManager {
                 }
             }
         }
-        releaseReisaTextures();
+        releaseRegisteredTextures();
         reisaReadyCache = true;
     }
 
     private void installFfmpeg(Path archive) throws IOException {
+        FFmpegNativePlatform platform = FFmpegNativePlatform.current();
+        if (platform == null) {
+            throw new IOException("FFmpeg natives are unsupported on " + ClientPlatform.displayName());
+        }
         Files.createDirectories(ffmpegNativeDir);
-        Set<String> required = Set.copyOf(FFMPEG_NATIVE_FILES);
+        List<String> nativeFiles = platform.nativeFiles();
+        Set<String> required = Set.copyOf(nativeFiles);
         Map<String, ZipEntry> entries = new LinkedHashMap<>();
         try (ZipFile zip = new ZipFile(archive.toFile())) {
             var iterator = zip.entries().asIterator();
@@ -512,7 +534,7 @@ public class AssetManager {
                     entries.put(name, entry);
                 }
             }
-            for (String name : FFMPEG_NATIVE_FILES) {
+            for (String name : nativeFiles) {
                 ZipEntry entry = entries.get(name);
                 if (entry == null) {
                     throw new IOException("ffmpeg archive is missing " + name);
@@ -527,7 +549,7 @@ public class AssetManager {
     }
 
     // ------------------------------------------------------------------
-    // FFmpeg 与玲纱纹理
+    // FFmpeg、玲纱纹理与背景光效
     // ------------------------------------------------------------------
 
     /**
@@ -550,7 +572,27 @@ public class AssetManager {
         if (!isReisaReady()) {
             return null;
         }
-        Identifier existing = reisaTextures.get(suffix);
+        return pngTexture("reisa_" + suffix,
+                reisaDir.resolve("reisa_" + suffix + ".png"),
+                "textures/gui/galgame/reisa_" + suffix + ".png",
+                "Reisa " + suffix);
+    }
+
+    /**
+     * 返回主菜单视频叠层光效的纹理标识，未下载或不在渲染线程时返回 {@code null}。
+     */
+    public Identifier videoOverlayTexture() {
+        if (!isLightTrailsReady()) {
+            return null;
+        }
+        return pngTexture("lighttrails", lightTrailsFile, "textures/lighttrails.png", "Main menu light trails");
+    }
+
+    /**
+     * 把磁盘上的 PNG 惰性注册为动态纹理；纹理管理必须在渲染线程上进行。
+     */
+    private Identifier pngTexture(String key, Path file, String resourcePath, String label) {
+        Identifier existing = registeredTextures.get(key);
         if (existing != null) {
             return existing;
         }
@@ -558,24 +600,22 @@ public class AssetManager {
             return null;
         }
 
-        Path file = reisaDir.resolve("reisa_" + suffix + ".png");
         try (InputStream in = Files.newInputStream(file)) {
             NativeImage image = NativeImage.read(in);
-            DynamicTexture texture = new DynamicTexture(() -> "Epsilon Reisa " + suffix, image);
-            Identifier identifier = Identifier.fromNamespaceAndPath(
-                    "epsilon_assets", "textures/gui/galgame/reisa_" + suffix + ".png");
+            DynamicTexture texture = new DynamicTexture(() -> "Epsilon " + label, image);
+            Identifier identifier = Identifier.fromNamespaceAndPath("epsilon_assets", resourcePath);
             mc.getTextureManager().register(identifier, texture);
-            reisaTextures.put(suffix, identifier);
+            registeredTextures.put(key, identifier);
             return identifier;
         } catch (IOException e) {
-            Constants.LOGGER.warn("[AssetManager] Failed to load reisa_{} texture", suffix, e);
+            Constants.LOGGER.warn("[AssetManager] Failed to load {} texture from {}", label, file, e);
             return null;
         }
     }
 
-    public void releaseReisaTextures() {
-        Map<String, Identifier> registered = Map.copyOf(reisaTextures);
-        reisaTextures.clear();
+    public void releaseRegisteredTextures() {
+        Map<String, Identifier> registered = Map.copyOf(registeredTextures);
+        registeredTextures.clear();
         if (registered.isEmpty() || mc == null || !RenderSystem.isOnRenderThread()) {
             return;
         }
@@ -586,7 +626,7 @@ public class AssetManager {
      * 清空 {@code ~/.epsilon/assets}，下次使用时会重新走下载流程。
      */
     public void clearCache() {
-        releaseReisaTextures();
+        releaseRegisteredTextures();
         declinedThisSession.clear();
         reisaReadyCache = null;
         if (!Files.exists(rootDir)) {
@@ -643,10 +683,39 @@ public class AssetManager {
 
     private String urlFor(Asset asset) {
         if (asset == Asset.FFMPEG) {
-            String url = ClientSettingUrl.ffmpegUrl();
-            return url.isBlank() ? DEFAULT_FFMPEG_URL : url;
+            return ffmpegUrl();
         }
         return ClientSettingUrl.resourceBaseUrl() + asset.fileName();
+    }
+
+    /**
+     * 解析 FFmpeg 原生库下载地址。
+     * <p>
+     * 只有指向当前平台产物的 http(s) 地址才会覆盖默认值；空值、被截断的值以及旧版本或其它平台残留的
+     * 地址都会回退到当前平台的默认地址，避免下到与平台不匹配的原生库。
+     */
+    private static String ffmpegUrl() {
+        String url = ClientSettingUrl.ffmpegUrl();
+        return FFmpegNativePlatform.isUrlForCurrentPlatform(url)
+                ? url
+                : FFmpegNativePlatform.currentOrDefault().defaultUrl();
+    }
+
+    /**
+     * 把设置里不可用的 FFmpeg 下载地址修正为当前平台的默认地址。
+     * <p>
+     * 旧版本的输入框会把长地址截断后写回配置，切换平台也会残留另一平台的地址；这些值本来就会被
+     * {@link #ffmpegUrl()} 忽略，这里同步回设置项，避免界面显示与实际下载行为不一致。必须在客户端线程调用。
+     */
+    private void normalizeFfmpegDownloadUrl() {
+        String configured = ClientSettingUrl.ffmpegUrl();
+        String resolved = ffmpegUrl();
+        if (Objects.equals(configured, resolved)) {
+            return;
+        }
+        ClientSetting.INSTANCE.ffmpegDownloadUrl.setValue(resolved);
+        ConfigManager.INSTANCE.saveNow();
+        Constants.LOGGER.info("[AssetManager] FFmpeg download URL reset to {}", resolved);
     }
 
     private Path reisaFile(String suffix) {
