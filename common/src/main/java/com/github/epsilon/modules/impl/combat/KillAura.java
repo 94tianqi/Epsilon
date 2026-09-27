@@ -95,6 +95,7 @@ public class KillAura extends Module {
     private final IntSetting rotationSpeed = intSetting("Rotation Speed", 180, 10, 180, 10);
     private final EnumSetting<Priority> rotationPriority = enumSetting("Rotation Priority", Priority.High);
     private final IntSetting cps = intSetting("CPS", 12, 1, 20, 1, () -> mode.is(Mode.OnePointEight));
+    private final DoubleSetting cpsJitter = doubleSetting("CPS Jitter", 0.2, 0.0, 1.0, 0.05, () -> mode.is(Mode.OnePointEight));
 
     private final BoolSetting players = boolSetting("Players", true);
     private final BoolSetting mobs = boolSetting("Mobs", true);
@@ -141,6 +142,7 @@ public class KillAura extends Module {
 
     private int attacks;
     private long lastAttackTime;
+    private long nextAttackDelay;
 
     private final TimerUtils switchTimer = new TimerUtils();
 
@@ -184,6 +186,7 @@ public class KillAura extends Module {
 
         Velocity velocity = Velocity.INSTANCE;
 
+        // 击退偏航预排序：List.sort 稳定，此顺序会成为后续 priorityMode 中同权重目标的 tiebreak（保留回击倾向），勿因“会被覆盖”而删除。
         if (velocity.delay) {
             targets.sort(
                     Comparator.comparingDouble(o -> (double) Math.abs(velocity.yaw - RotationUtils.calculate(o).getYaw()))
@@ -213,19 +216,15 @@ public class KillAura extends Module {
 
         switch (priorityMode.getValue()) {
             case Range -> targets.sort(Comparator.comparingDouble(o -> (double) o.distanceTo(mc.player)));
-            case Fov -> {
-                targets.sort(Comparator.comparingDouble(o -> (double) Math.abs(Mth.wrapDegrees(mc.player.getXRot() - RotationUtils.calculate(o).getYaw()))));
-            }
-            case Health -> {
-                targets.sort(Comparator.comparingDouble(o -> o instanceof LivingEntity living ? (double) living.getHealth() : 0.0));
-            }
+            case Fov -> targets.sort(Comparator.comparingDouble(o -> (double) Math.abs(Mth.wrapDegrees(mc.player.getYRot() - RotationUtils.calculate(o).getYaw()))));
+            case Health -> targets.sort(Comparator.comparingDouble(LivingEntity::getHealth));
         }
 
         target = targets.get(targetIndex);
 
         Rot2f calculate = RotationUtils.calculate(target, true, aimRange.getValue());
         if (RaytraceUtils.raytrace(calculate, aimRange.getValue()).getType() == HitResult.Type.BLOCK) return;
-        RotationManager.INSTANCE.setRotations(calculate, rotationSpeed.getValue(), rotation -> RaytraceUtils.raytrace(rotation, 3.0f) instanceof EntityHitResult entityHitResult && entityHitResult.getEntity() == target, rotationPriority.getValue());
+        RotationManager.INSTANCE.setRotations(calculate, rotationSpeed.getValue(), rotation -> RaytraceUtils.raytrace(rotation, aimRange.getValue()) instanceof EntityHitResult entityHitResult && entityHitResult.getEntity() == target, rotationPriority.getValue());
 
         HitResult hitResult = RotationManager.INSTANCE.getHitResult();
         if (hitSelect.getValue() && hitResult instanceof EntityHitResult entityHitResult && entityHitResult.getEntity() instanceof Player player && !AntiBot.INSTANCE.isBot(player) && !TargetManager.INSTANCE.isSameTeam(player) && velocity.attackQueue <= 0) {
@@ -233,41 +232,27 @@ public class KillAura extends Module {
             PlayerInfo localPlayerInfo = connection == null ? null : connection.getPlayerInfo(mc.player.getUUID());
             int latencyTicks = localPlayerInfo == null ? 0 : localPlayerInfo.getLatency() / 50;
             if (player.hurtTime <= latencyTicks + 1 || (mc.player.hurtTime >= 6 && !Velocity.INSTANCE.isEnabled()) || Criticals.INSTANCE.fallTicks == 2) {
-                switch (mode.getValue()) {
-                    case OnePointNinePlus -> {
-                        if (attacks == 0 && mc.player.getAttackStrengthScale(0.5f) >= 1.0f) {
-                            attacks++;
-                        }
-                    }
-                    case OnePointEight -> {
-                        long time = System.currentTimeMillis();
-                        if (time - lastAttackTime >= (long) (1000.0 / cps.getValue())) {
-                            attacks++;
-                            lastAttackTime = time;
-                        }
-                    }
-                }
+                scheduleAttack();
             }
         }
     }
 
     @EventHandler
     private void onPlayerTick(PlayerTickEvent.Pre event) {
-        HitResult hitResult = RotationManager.INSTANCE.getHitResult();
-        while (attacks > 0) {
-            attacks--;
-            if (pauseOnEat.getValue() && PlayerUtils.isEating() || NoSlowdown.INSTANCE.isWorking()) return;
-            if (hitResult instanceof EntityHitResult entityHitResult) {
-                Entity entity = entityHitResult.getEntity();
-                if (!entity.isAlive()) return;
+        if (attacks <= 0) return;
+        if (pauseOnEat.getValue() && PlayerUtils.isEating() || NoSlowdown.INSTANCE.isWorking()) return;
+        attacks = 0;
 
-                mc.gameMode.attack(mc.player, entity);
+        if (RotationManager.INSTANCE.getHitResult() instanceof EntityHitResult entityHitResult) {
+            Entity entity = entityHitResult.getEntity();
+            if (!entity.isAlive()) return;
 
-                if (espMode.is(ESPMode.Deobf)) DeobfESP.markHit(entity);
+            mc.gameMode.attack(mc.player, entity);
 
-                if (swingHand.getValue()) {
-                    PlayerUtils.swingHand(InteractionHand.MAIN_HAND);
-                }
+            if (espMode.is(ESPMode.Deobf)) DeobfESP.markHit(entity);
+
+            if (swingHand.getValue()) {
+                PlayerUtils.swingHand(InteractionHand.MAIN_HAND);
             }
         }
     }
@@ -277,20 +262,7 @@ public class KillAura extends Module {
         if (target != null && Velocity.INSTANCE.attackQueue <= 0) {
             HitResult hitResult = RotationManager.INSTANCE.getHitResult();
             if (!hitSelect.getValue() || !(hitResult instanceof EntityHitResult entityHitResult && entityHitResult.getEntity() instanceof Player)) {
-                switch (mode.getValue()) {
-                    case OnePointNinePlus -> {
-                        if (attacks == 0 && mc.player.getAttackStrengthScale(0.5f) >= 1.0f) {
-                            attacks++;
-                        }
-                    }
-                    case OnePointEight -> {
-                        long time = System.currentTimeMillis();
-                        if (time - lastAttackTime >= (long) (1000.0 / cps.getValue())) {
-                            attacks++;
-                            lastAttackTime = time;
-                        }
-                    }
-                }
+                scheduleAttack();
             }
         }
 
@@ -341,11 +313,42 @@ public class KillAura extends Module {
         }
     }
 
+    /**
+     * 按当前模式判定是否排入一次攻击；1.8 使用带随机抖动的 CPS 间隔，1.9+ 依原版攻击冷却。
+     * attacks 至多为 1，避免暂停或掉帧后在一个 tick 内连击。
+     */
+    private void scheduleAttack() {
+        switch (mode.getValue()) {
+            case OnePointNinePlus -> {
+                if (attacks == 0 && mc.player.getAttackStrengthScale(0.5f) >= 1.0f) attacks = 1;
+            }
+            case OnePointEight -> {
+                long time = System.currentTimeMillis();
+                if (time - lastAttackTime >= nextAttackDelay) {
+                    attacks = 1;
+                    lastAttackTime = time;
+                    nextAttackDelay = rollAttackDelay();
+                }
+            }
+        }
+    }
+
+    /**
+     * 在 1000/CPS 基础上叠加 ±抖动比例的随机间隔，避免固定节拍被反作弊识别。
+     */
+    private long rollAttackDelay() {
+        double base = 1000.0 / cps.getValue();
+        return (long) Math.max(1.0, base * (1.0 + cpsJitter.getValue() * (Math.random() * 2.0 - 1.0)));
+    }
+
     private void resetState() {
         targets = null;
         target = null;
+        targetIndex = 0;
         attacks = 0;
         lastAttackTime = 0L;
+        nextAttackDelay = 0L;
+        switchTimer.reset();
     }
 
 }

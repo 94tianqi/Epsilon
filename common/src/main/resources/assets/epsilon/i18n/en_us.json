@@ -975,6 +975,7 @@
           "highest": "Highest"
         },
         "cps": "CPS",
+        "cps jitter": "CPS Jitter",
         "players": "Players",
         "mobs": "Mobs",
         "animals": "Animals",

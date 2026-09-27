@@ -975,6 +975,7 @@
           "highest": "最高"
         },
         "cps": "每秒点击数",
+        "cps jitter": "点击间隔抖动",
         "players": "玩家",
         "mobs": "怪物",
         "animals": "动物",

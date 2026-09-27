@@ -141,3 +141,19 @@ rg -n "methodName" reference/vanilla-26.3/net/minecraft -g "*.java"
 - 运行与改动范围匹配的任务。共享行为至少检查 Fabric 和 NeoForge 编译；Mixin、资源、启动或 Gradle 变更运行完整 `buildRelease`。
 - 最终执行 `git diff --check`、`git diff -- AGENTS.md` 和 `git status --short`。
 - 文档入口和主题划分见 [`docs/README.md`](docs/README.md)；文档移动或重命名时必须修复仓库内链接。
+
+## Agent skills
+
+外部工程 Skill（`to-tickets`、`triage`、`to-spec`、`implement`、`wayfinder`、`domain-modeling` 等）通过 `docs/agents/` 下的文件读取本仓库约定。
+
+### Issue tracker
+
+Issue 记录在 GitHub 仓库 `94tianqi/Epsilon`；因存在 `upstream` 远程，所有 `gh` 命令必须显式传 `--repo 94tianqi/Epsilon`。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用五个规范角色标签（标签名与角色同名）：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文布局（根目录 `CONTEXT.md` + `docs/adr/`，均按需惰性创建）。见 `docs/agents/domain.md`。

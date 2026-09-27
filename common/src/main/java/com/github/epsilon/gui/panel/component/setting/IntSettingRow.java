@@ -4,6 +4,7 @@ import com.github.epsilon.graphics.renderers.TextRenderer;
 import com.github.epsilon.gui.lib.UiRect;
 import com.github.epsilon.gui.lib.UiTree;
 import com.github.epsilon.gui.panel.component.SettingRow;
+import com.github.epsilon.gui.panel.utils.IMEFocusHelper;
 import com.github.epsilon.gui.theme.MD3Theme;
 import com.github.epsilon.settings.impl.IntSetting;
 import com.github.epsilon.utils.render.animation.Animation;
@@ -108,7 +109,7 @@ public class IntSettingRow extends SettingRow<IntSetting> {
         UiRect fieldBounds = getFieldBounds(bounds);
         if (event.button() == InputConstants.MOUSE_BUTTON_LEFT && fieldBounds.contains(event.x(), event.y())) {
             dragging = false;
-            focused = true;
+            applyFocus(true);
             inputBuffer = formatPlainValue();
             cursorIndex = getCursorIndex(event.x(), fieldBounds);
             return true;
@@ -116,7 +117,7 @@ public class IntSettingRow extends SettingRow<IntSetting> {
         if (event.button() != InputConstants.MOUSE_BUTTON_LEFT || !getInteractiveBounds(bounds).contains(event.x(), event.y())) {
             return false;
         }
-        focused = false;
+        applyFocus(false);
         dragging = true;
         updateFromMouse(bounds, event.x());
         return true;
@@ -141,11 +142,11 @@ public class IntSettingRow extends SettingRow<IntSetting> {
         return switch (event.key()) {
             case InputConstants.KEY_RETURN, InputConstants.KEY_NUMPADENTER -> {
                 commitInput();
-                focused = false;
+                applyFocus(false);
                 yield true;
             }
             case InputConstants.KEY_ESCAPE -> {
-                focused = false;
+                applyFocus(false);
                 inputBuffer = null;
                 yield true;
             }
@@ -195,10 +196,27 @@ public class IntSettingRow extends SettingRow<IntSetting> {
             commitInput();
             inputBuffer = null;
         }
-        this.focused = focused;
+        applyFocus(focused);
         if (focused && inputBuffer == null) {
             inputBuffer = formatPlainValue();
             cursorIndex = inputBuffer.length();
+        }
+    }
+
+    /**
+     * 统一处理聚焦跳变：仅在真正变化时切换，并同步开关系统级文本输入（IME）。
+     * 26.3 起字符输入依赖 {@link IMEFocusHelper} 显式开启，其引用计数必须配对，
+     * 因此所有 focused 赋值都要经由此方法，避免漏开导致键盘无法输入、漏关导致计数泄漏。
+     */
+    private void applyFocus(boolean focus) {
+        if (focus == this.focused) {
+            return;
+        }
+        this.focused = focus;
+        if (focus) {
+            IMEFocusHelper.activate();
+        } else {
+            IMEFocusHelper.deactivate();
         }
     }
 

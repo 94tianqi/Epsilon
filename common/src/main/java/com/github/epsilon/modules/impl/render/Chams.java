@@ -96,6 +96,13 @@ public class Chams extends Module {
     }
 
     public boolean isValidEntity(Entity entity) {
+        // GUI 内实体预览（背包玩家模型等）经 GuiEntityRenderer 走 PiP 路径，其 renderState
+        // 由 renderer.createRenderState 直接创建，绕过 EntityRenderDispatcher.extractEntity，
+        // 未绑定实体。entity 为 null 时按“非透视目标”处理：既避免 NPE，也不给 GUI 预览套 Chams。
+        if (entity == null) {
+            return false;
+        }
+
         if (entity instanceof Player player) {
             if (player == mc.player && !self.getValue()) {
                 return false;
